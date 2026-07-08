@@ -1,0 +1,6 @@
+{
+  "name": "课堂点名记数器",
+  "description": "一个优雅好用的课堂点名统计助手。支持多班级管理、学生信息与备注录入、快捷点击累加次数、一键重置计数、随机点名抽取、以及数据导入导出备份，让课堂提问公平、高效。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
