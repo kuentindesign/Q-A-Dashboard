@@ -1,0 +1,68 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global Safety Net: Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Classroom Validation Helper
+    function isValidClassroom(data) {
+      return data.id is string 
+        && data.id.size() <= 128
+        && data.userId is string 
+        && data.userId == request.auth.uid
+        && data.name is string 
+        && data.name.size() <= 100
+        && data.description is string 
+        && data.description.size() <= 500
+        && data.students is list
+        && data.students.size() <= 150
+        && data.createdAt is string
+        && data.createdAt.size() <= 40
+        && data.updatedAt is string
+        && data.updatedAt.size() <= 40;
+    }
+
+    // Match statement for Classrooms
+    match /classrooms/{classroomId} {
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      
+      allow create: if isSignedIn() 
+        && isValidId(classroomId)
+        && isValidClassroom(incoming());
+
+      allow update: if isSignedIn()
+        && isValidId(classroomId)
+        && isValidClassroom(incoming())
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && (
+          // Action: any update to classroom name, description, or students list
+          incoming().diff(existing()).affectedKeys().hasAny(['name', 'description', 'students', 'updatedAt'])
+        );
+
+      allow delete: if isSignedIn() 
+        && existing().userId == request.auth.uid;
+    }
+  }
+}

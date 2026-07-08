@@ -3,13 +3,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Classroom, Student } from './types';
 import ClassroomSelector from './components/ClassroomSelector';
 import StudentGrid from './components/StudentGrid';
-import DataManagement from './components/DataManagement';
-import { BookOpen, Volume2, VolumeX, GraduationCap, Github, Layers, AlertCircle, HelpCircle } from 'lucide-react';
+import { BookOpen, Volume2, VolumeX, GraduationCap, Github, Layers, AlertCircle, HelpCircle, Cloud, User, CloudLightning } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { auth } from './lib/firebase';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { 
+  getClassroomsFromCloud, 
+  saveClassroomToCloud, 
+  deleteClassroomFromCloud, 
+  mergeLocalClassroomsToCloud,
+  OperationType,
+  handleFirestoreError 
+} from './lib/db';
+import AuthModal from './components/AuthModal';
 
 // Web Audio API tactile feedback helper
 const playBeep = (frequency = 600, duration = 0.08) => {
@@ -75,36 +85,129 @@ export default function App() {
   const [activeClassroomId, setActiveClassroomId] = useState<string | null>(null);
   const [soundEnabled, setSoundEnabled] = useState(true);
 
-  // 1. Initial Load from LocalStorage
+  // Firebase states
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [hasLocalData, setHasLocalData] = useState(false);
+
+  const prevClassroomsRef = useRef<Classroom[]>([]);
+
+  // 1. Initial Load and Auth State Listener
   useEffect(() => {
+    // Check if we have some local classrooms in localStorage
     try {
-      const savedData = localStorage.getItem(LOCAL_STORAGE_KEY);
-      if (savedData) {
-        const parsed = JSON.parse(savedData);
+      const localData = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (localData) {
+        const parsed = JSON.parse(localData);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          setClassrooms(parsed);
-          setActiveClassroomId(parsed[0].id);
-          return;
+          setHasLocalData(true);
         }
       }
-      // If no data, load seed demo data
-      setClassrooms(demoClassrooms);
-      setActiveClassroomId(demoClassrooms[0].id);
     } catch (e) {
-      console.error('Failed to parse localStorage data', e);
-      setClassrooms(demoClassrooms);
-      setActiveClassroomId(demoClassrooms[0].id);
+      console.error(e);
     }
+
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+
+      if (currentUser) {
+        // Logged in: Load classrooms from Cloud
+        setSyncing(true);
+        try {
+          const cloudClassrooms = await getClassroomsFromCloud(currentUser.uid);
+          setClassrooms(cloudClassrooms);
+          prevClassroomsRef.current = cloudClassrooms;
+          if (cloudClassrooms.length > 0) {
+            setActiveClassroomId(cloudClassrooms[0].id);
+          } else {
+            setActiveClassroomId(null);
+          }
+        } catch (err) {
+          console.error(err);
+        } finally {
+          setSyncing(false);
+        }
+      } else {
+        // Not logged in: Load classrooms from LocalStorage
+        try {
+          const savedData = localStorage.getItem(LOCAL_STORAGE_KEY);
+          if (savedData) {
+            const parsed = JSON.parse(savedData);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setClassrooms(parsed);
+              prevClassroomsRef.current = parsed;
+              setActiveClassroomId(parsed[0].id);
+              return;
+            }
+          }
+          // Default seed data
+          setClassrooms(demoClassrooms);
+          prevClassroomsRef.current = demoClassrooms;
+          setActiveClassroomId(demoClassrooms[0].id);
+        } catch (e) {
+          setClassrooms(demoClassrooms);
+          prevClassroomsRef.current = demoClassrooms;
+          setActiveClassroomId(demoClassrooms[0].id);
+        }
+      }
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  // 2. Save classrooms whenever they change
+  // 2. Save classrooms to LocalStorage (as a local backup)
   const saveClassroomsToStorage = (updatedClassrooms: Classroom[]) => {
     try {
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updatedClassrooms));
+      if (updatedClassrooms.length > 0) {
+        setHasLocalData(true);
+      } else {
+        setHasLocalData(false);
+      }
     } catch (e) {
       console.error('Failed to save data to localStorage', e);
     }
   };
+
+  // 3. Side-effect to automatically sync state changes with Cloud
+  useEffect(() => {
+    if (!user || authLoading) return;
+
+    const syncWithCloud = async () => {
+      const prev = prevClassroomsRef.current;
+      const next = classrooms;
+
+      // Avoid syncing if unchanged
+      if (JSON.stringify(prev) === JSON.stringify(next)) return;
+
+      setSyncing(true);
+      try {
+        // Find deleted classrooms
+        const deleted = prev.filter(p => !next.some(n => n.id === p.id));
+        for (const classroom of deleted) {
+          await deleteClassroomFromCloud(classroom.id);
+        }
+
+        // Find created or updated classrooms
+        for (const classroom of next) {
+          const oldClassroom = prev.find(p => p.id === classroom.id);
+          if (!oldClassroom || JSON.stringify(oldClassroom) !== JSON.stringify(classroom)) {
+            await saveClassroomToCloud(classroom, user.uid);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to sync changes with cloud', err);
+      } finally {
+        setSyncing(false);
+      }
+    };
+
+    syncWithCloud();
+    prevClassroomsRef.current = classrooms;
+  }, [classrooms, user, authLoading]);
 
   const updateClassrooms = (updater: (prev: Classroom[]) => Classroom[]) => {
     setClassrooms((prev) => {
@@ -112,6 +215,36 @@ export default function App() {
       saveClassroomsToStorage(next);
       return next;
     });
+  };
+
+  const handleMergeLocalData = async () => {
+    if (!user) return;
+    setSyncing(true);
+    try {
+      const savedData = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (savedData) {
+        const localClassrooms = JSON.parse(savedData);
+        if (Array.isArray(localClassrooms) && localClassrooms.length > 0) {
+          await mergeLocalClassroomsToCloud(localClassrooms, user.uid);
+          // Reload from cloud
+          const cloudClassrooms = await getClassroomsFromCloud(user.uid);
+          setClassrooms(cloudClassrooms);
+          prevClassroomsRef.current = cloudClassrooms;
+          if (cloudClassrooms.length > 0) {
+            setActiveClassroomId(cloudClassrooms[0].id);
+          }
+          // Clear local data after successful merge
+          localStorage.removeItem(LOCAL_STORAGE_KEY);
+          setHasLocalData(false);
+          alert('🎉 恭喜，本地班级和学生数据已成功合并并同步至云端！');
+        }
+      }
+    } catch (err) {
+      console.error('Failed to merge local data', err);
+      alert('合并数据失败，请重试');
+    } finally {
+      setSyncing(false);
+    }
   };
 
   // Find the active classroom object
@@ -199,22 +332,16 @@ export default function App() {
     if (soundEnabled) playBeep(750, 0.12);
   };
 
-  // Bulk student pasting
-  const handleAddStudentsBatch = (namesText: string) => {
-    // Regex split by commas, spaces, or newlines
-    const rawNames = namesText.split(/[\n,\s，、]+/);
-    const cleanedNames = rawNames
-      .map((name) => name.trim())
-      .filter((name) => name.length > 0);
+  // Bulk student importing
+  const handleAddStudentsBatch = (studentsList: { name: string; notes?: string; tags?: string[] }[]) => {
+    if (studentsList.length === 0) return;
 
-    if (cleanedNames.length === 0) return;
-
-    const newStudents: Student[] = cleanedNames.map((name) => ({
+    const newStudents: Student[] = studentsList.map((s) => ({
       id: `stud-${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${Math.floor(Math.random() * 1000)}`,
-      name,
-      notes: '',
+      name: s.name.trim(),
+      notes: s.notes?.trim() || '',
       count: 0,
-      tags: [],
+      tags: s.tags || [],
     }));
 
     updateClassrooms((prev) =>
@@ -278,15 +405,19 @@ export default function App() {
     if (soundEnabled) playBeep(250, 0.25);
   };
 
-  const handleImportFullData = (importedClassrooms: Classroom[]) => {
-    setClassrooms(importedClassrooms);
-    saveClassroomsToStorage(importedClassrooms);
-    if (importedClassrooms.length > 0) {
-      setActiveClassroomId(importedClassrooms[0].id);
-    } else {
-      setActiveClassroomId(null);
-    }
-    if (soundEnabled) playBeep(900, 0.3);
+  const handleClearAllStudents = () => {
+    updateClassrooms((prev) =>
+      prev.map((c) => {
+        if (c.id === activeClassroomId) {
+          return {
+            ...c,
+            students: [],
+          };
+        }
+        return c;
+      })
+    );
+    if (soundEnabled) playBeep(250, 0.25);
   };
 
   return (
@@ -299,17 +430,49 @@ export default function App() {
               <GraduationCap size={22} className="stroke-[2]" />
             </div>
             <div>
-              <h1 className="text-lg font-bold text-slate-800 tracking-tight flex items-center gap-1.5">
+              <h1 className="text-lg font-bold text-slate-800 tracking-tight flex items-center gap-1.5 flex-wrap">
                 课堂点名记数器
-                <span className="text-[10px] font-semibold bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full">
-                  本地持久存储
-                </span>
+                {user ? (
+                  <span className="text-[10px] font-semibold bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-full flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping"></span>
+                    云端同步中
+                  </span>
+                ) : (
+                  <span className="text-[10px] font-semibold bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">
+                    本地存储模式
+                  </span>
+                )}
+                {syncing && (
+                  <span className="text-[10px] font-semibold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse"></span>
+                    正在同步...
+                  </span>
+                )}
               </h1>
               <p className="text-xs text-slate-500">高效记录点名提问，助推课堂多维公平</p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Cloud Sync Auth Button */}
+            {user ? (
+              <button
+                onClick={() => setShowAuthModal(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-100 rounded-xl text-xs font-bold transition-all"
+              >
+                <Cloud size={14} className="text-emerald-500" />
+                <span className="max-w-[120px] truncate">{user.email?.split('@')[0]}</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowAuthModal(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs"
+              >
+                <Cloud size={14} />
+                <span>登录云端同步</span>
+              </button>
+            )}
+
             {/* Audio Toggle button */}
             <button
               onClick={() => setSoundEnabled(!soundEnabled)}
@@ -328,19 +491,6 @@ export default function App() {
 
       {/* 2. Main Container Grid */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 w-full flex-1 flex flex-col gap-6">
-        {/* Top-level notice explaining the storage logic for peace of mind */}
-        <div className="bg-gradient-to-r from-blue-50/70 to-slate-50/50 border border-blue-100/30 rounded-2xl p-5 flex gap-3 shadow-xs">
-          <div className="text-blue-600 p-0.5 shrink-0">
-            <HelpCircle size={18} />
-          </div>
-          <div className="text-xs space-y-1">
-            <span className="font-bold text-blue-950 block">💡 老师，请放心！您的数据完全存在本地，不会丢失</span>
-            <p className="text-slate-500 leading-relaxed">
-              本工具采用<strong className="text-blue-700">浏览器本地持久化技术(LocalStorage)</strong>，即使断网、刷新网页、或在之后重新点开此网址，您的班级及学生提问次数依然完好保存。如果您需要换电脑或想彻底备份，可以使用下方的<strong className="text-blue-700">一键下载完整备份</strong>功能，非常安全可靠！
-            </p>
-          </div>
-        </div>
-
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Sidebar Area (Left 4 cols on desktop) */}
           <div className="lg:col-span-4 flex flex-col gap-6">
@@ -366,6 +516,7 @@ export default function App() {
                 onEditStudent={handleEditStudent}
                 onDeleteStudent={handleDeleteStudent}
                 onResetClassroomCounts={handleResetClassroomCounts}
+                onClearAllStudents={handleClearAllStudents}
               />
             ) : (
               <div className="bg-white border border-slate-200 rounded-3xl p-16 text-center shadow-sm flex flex-col items-center justify-center min-h-[400px]">
@@ -385,24 +536,42 @@ export default function App() {
             )}
           </div>
         </div>
-
-        {/* 3. Bottom Utility Area: Backup & Import */}
-        <DataManagement
-          classrooms={classrooms}
-          activeClassroom={activeClassroom}
-          onImportFullData={handleImportFullData}
-        />
       </main>
 
       {/* Quick Stats Footer matching style */}
       <footer className="mt-auto h-12 bg-slate-800 text-slate-400 flex items-center px-8 text-xs gap-6 rounded-t-xl max-w-7xl mx-auto w-full">
         <span className="flex items-center gap-1.5">
-          <span className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></span>
-          本地数据已自动同步
+          {user ? (
+            <>
+              <span className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></span>
+              云端数据安全同步已开启
+            </>
+          ) : (
+            <>
+              <span className="w-2 h-2 bg-amber-400 rounded-full"></span>
+              本地存储模式 (换设备数据会丢失)
+            </>
+          )}
         </span>
-        <span>当前登录: 课堂教学助手</span>
-        <span className="ml-auto">自动备份: 已启用</span>
+        <span>当前状态: {user ? '多端共享中' : '离线存储'}</span>
+        {user && (
+          <span className="ml-auto flex items-center gap-1">
+            <Cloud size={12} className="text-emerald-400" /> 
+            安全备份: {user.email}
+          </span>
+        )}
       </footer>
+
+      <AnimatePresence>
+        {showAuthModal && (
+          <AuthModal
+            user={user}
+            onClose={() => setShowAuthModal(false)}
+            onMergeLocalData={handleMergeLocalData}
+            hasLocalData={hasLocalData}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

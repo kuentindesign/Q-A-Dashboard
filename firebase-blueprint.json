@@ -1,0 +1,38 @@
+{
+  "collections": {
+    "classrooms": {
+      "path": "classrooms/{classroomId}",
+      "description": "Stores user classrooms and student details, synced to the user's logged-in account",
+      "fields": {
+        "id": {
+          "type": "string",
+          "description": "Unique ID of the classroom"
+        },
+        "userId": {
+          "type": "string",
+          "description": "The UID of the owning user"
+        },
+        "name": {
+          "type": "string",
+          "description": "Name of the classroom"
+        },
+        "description": {
+          "type": "string",
+          "description": "Description of the classroom"
+        },
+        "students": {
+          "type": "array",
+          "description": "List of student records under the classroom"
+        },
+        "createdAt": {
+          "type": "timestamp",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "timestamp",
+          "description": "Last update timestamp"
+        }
+      }
+    }
+  }
+}

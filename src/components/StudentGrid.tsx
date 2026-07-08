@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { Classroom, Student } from '../types';
 import {
   Plus,
@@ -15,18 +15,24 @@ import {
   ChevronDown,
   ArrowUpDown,
   BookOpen,
-  ClipboardList
+  ClipboardList,
+  Upload,
+  Download,
+  FileSpreadsheet,
+  AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import * as XLSX from 'xlsx';
 
 interface StudentGridProps {
   classroom: Classroom;
   onCallStudent: (id: string) => void;
   onAddStudent: (name: string, notes: string, tags: string[]) => void;
-  onAddStudentsBatch: (namesText: string) => void;
+  onAddStudentsBatch: (students: { name: string; notes?: string; tags?: string[] }[]) => void;
   onEditStudent: (id: string, name: string, notes: string, tags: string[]) => void;
   onDeleteStudent: (id: string) => void;
   onResetClassroomCounts: () => void;
+  onClearAllStudents: () => void;
 }
 
 export default function StudentGrid({
@@ -37,6 +43,7 @@ export default function StudentGrid({
   onEditStudent,
   onDeleteStudent,
   onResetClassroomCounts,
+  onClearAllStudents,
 }: StudentGridProps) {
   const [sortBy, setSortBy] = useState<'default' | 'name' | 'count-asc' | 'count-desc' | 'last-called'>('default');
   
@@ -49,7 +56,11 @@ export default function StudentGrid({
 
   // Batch Add state
   const [isAddingBatch, setIsAddingBatch] = useState(false);
+  const [importMethod, setImportMethod] = useState<'excel' | 'paste'>('excel');
   const [batchText, setBatchText] = useState('');
+  const [excelError, setExcelError] = useState<string | null>(null);
+  const [parsedStudents, setParsedStudents] = useState<{ name: string; notes?: string; tags?: string[] }[]>([]);
+  const excelFileRef = useRef<HTMLInputElement>(null);
 
   // Editing student state
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
@@ -91,11 +102,146 @@ export default function StudentGrid({
     setIsAddingSingle(false);
   };
 
+  // Function to download the official excel template
+  const handleDownloadTemplate = () => {
+    const wsData = [
+      ['姓名 (必填)', '备注 (选填)', '标签 (选填，逗号隔开)'],
+      ['张三', '班长，数学课代表', '活跃,优秀'],
+      ['李四', '坐在第三排靠窗', '腼腆,幽默'],
+      ['王五', '体育委员', '活泼']
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '导入模板');
+    XLSX.writeFile(wb, `${classroom.name}-学生导入模板.xlsx`);
+  };
+
+  const handleExcelUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setExcelError(null);
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = evt.target?.result;
+        if (!data) return;
+        
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        
+        // Convert sheet to json array of arrays
+        const rows = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1 });
+        if (rows.length === 0) {
+          setExcelError('Excel 文件为空');
+          return;
+        }
+
+        let headerRowIndex = -1;
+        let nameCol = 0;
+        let notesCol = -1;
+        let tagsCol = -1;
+
+        // Try to identify header row or columns by keyword
+        for (let i = 0; i < Math.min(rows.length, 5); i++) {
+          const row = rows[i];
+          if (Array.isArray(row)) {
+            const hasName = row.some(cell => {
+              const val = String(cell || '').toLowerCase();
+              return val.includes('姓名') || val.includes('name') || val.includes('学生') || val.includes('student');
+            });
+            if (hasName) {
+              headerRowIndex = i;
+              row.forEach((cell, idx) => {
+                const val = String(cell || '').toLowerCase();
+                if (val.includes('姓名') || val.includes('name') || val.includes('学生') || val.includes('student')) {
+                  nameCol = idx;
+                } else if (val.includes('备注') || val.includes('说明') || val.includes('描述') || val.includes('notes') || val.includes('desc')) {
+                  notesCol = idx;
+                } else if (val.includes('标签') || val.includes('特征') || val.includes('tags') || val.includes('tag')) {
+                  tagsCol = idx;
+                }
+              });
+              break;
+            }
+          }
+        }
+
+        // Default columns if no header found
+        if (headerRowIndex === -1) {
+          nameCol = 0;
+          notesCol = 1;
+          tagsCol = 2;
+        }
+
+        const startIndex = headerRowIndex !== -1 ? headerRowIndex + 1 : 0;
+        const students: { name: string; notes?: string; tags?: string[] }[] = [];
+
+        for (let i = startIndex; i < rows.length; i++) {
+          const row = rows[i];
+          if (Array.isArray(row) && row.length > 0) {
+            const nameVal = String(row[nameCol] || '').trim();
+            if (nameVal && nameVal !== 'undefined' && !nameVal.includes('必填')) {
+              const notesVal = notesCol !== -1 && row[notesCol] !== undefined ? String(row[notesCol] || '').trim() : '';
+              const tagsVal = tagsCol !== -1 && row[tagsCol] !== undefined ? String(row[tagsCol] || '').trim() : '';
+              
+              // Parse tags by splitting commas or spaces
+              const tagsArray = tagsVal 
+                ? tagsVal.split(/[,，、\s/]+/).map(t => t.trim()).filter(t => t.length > 0)
+                : [];
+
+              students.push({
+                name: nameVal,
+                notes: notesVal === 'undefined' ? '' : notesVal,
+                tags: tagsArray
+              });
+            }
+          }
+        }
+
+        if (students.length === 0) {
+          setExcelError('未能从表格中识别到有效的学生姓名，请确认表格包含学生姓名列');
+        } else {
+          setParsedStudents(students);
+        }
+      } catch (err) {
+        setExcelError('解析 Excel 失败，请检查文件格式是否正确');
+        console.error(err);
+      }
+    };
+
+    reader.readAsArrayBuffer(file);
+  };
+
+  const handleRemoveParsedStudent = (index: number) => {
+    setParsedStudents(parsedStudents.filter((_, i) => i !== index));
+  };
+
   const handleAddBatch = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!batchText.trim()) return;
-    onAddStudentsBatch(batchText.trim());
-    setBatchText('');
+    if (importMethod === 'paste') {
+      if (!batchText.trim()) return;
+      const rawNames = batchText.split(/[\n,\s，、]+/);
+      const cleanedNames = rawNames
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0);
+
+      if (cleanedNames.length === 0) return;
+
+      const formattedStudents = cleanedNames.map(name => ({
+        name,
+        notes: '',
+        tags: []
+      }));
+
+      onAddStudentsBatch(formattedStudents);
+      setBatchText('');
+    } else {
+      if (parsedStudents.length === 0) return;
+      onAddStudentsBatch(parsedStudents);
+      setParsedStudents([]);
+    }
     setIsAddingBatch(false);
   };
 
@@ -137,6 +283,16 @@ export default function StudentGrid({
       )
     ) {
       onResetClassroomCounts();
+    }
+  };
+
+  const handleClearAllStudentsConfirm = () => {
+    if (
+      window.confirm(
+        '⚠️ 警告：确定要一键清除当前班级中的所有学生吗？\n这将彻底删除他们名下的所有信息和提问次数，且不可撤销！'
+      )
+    ) {
+      onClearAllStudents();
     }
   };
 
@@ -242,15 +398,25 @@ export default function StudentGrid({
             <span>批量导入</span>
           </button>
 
-          {/* Reset Counts */}
+          {/* Reset Counts & Clear All Students */}
           {classroom.students.length > 0 && (
-            <button
-              onClick={handleResetConfirm}
-              id="btn-clear-classroom-counts"
-              className="flex items-center gap-1 text-xs font-semibold text-rose-600 bg-rose-50 hover:bg-rose-100 hover:text-rose-700 transition-colors py-2 px-3 rounded-xl border border-rose-100"
-            >
-              <span>清空次数</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleResetConfirm}
+                id="btn-clear-classroom-counts"
+                className="flex items-center gap-1 text-xs font-semibold text-rose-600 bg-rose-50 hover:bg-rose-100 hover:text-rose-700 transition-colors py-2 px-3 rounded-xl border border-rose-100 whitespace-nowrap"
+              >
+                <span>清空次数</span>
+              </button>
+              <button
+                onClick={handleClearAllStudentsConfirm}
+                id="btn-clear-all-students"
+                className="flex items-center gap-1 text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 hover:text-red-700 transition-colors py-2 px-3 rounded-xl border border-red-100 whitespace-nowrap"
+              >
+                <Trash2 size={13} />
+                <span>清除学生</span>
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -370,44 +536,208 @@ export default function StudentGrid({
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
-            className="bg-white rounded-2xl border border-blue-100 shadow-sm p-5"
+            className="bg-white rounded-2xl border border-blue-100 shadow-sm p-5 space-y-4"
           >
-            <div className="flex justify-between items-center mb-3">
+            <div className="flex justify-between items-center pb-2 border-b border-slate-100">
               <h3 className="text-sm font-semibold text-slate-800 flex items-center gap-1.5">
                 <ClipboardList size={16} className="text-blue-600" />
                 批量导入学生至“{classroom.name}”
               </h3>
-              <button onClick={() => setIsAddingBatch(false)} className="text-slate-400 hover:text-slate-600">
+              <button 
+                onClick={() => {
+                  setIsAddingBatch(false);
+                  setParsedStudents([]);
+                  setExcelError(null);
+                }} 
+                className="text-slate-400 hover:text-slate-600"
+              >
                 ×
               </button>
             </div>
-            <form onSubmit={handleAddBatch} className="space-y-3">
-              <p className="text-[11px] text-slate-500">
-                请直接在下方粘贴学生名单，名字之间用<strong className="text-blue-600">逗号、空格、或换行</strong>隔开，系统会自动提取并过滤。例如：
-                <br />
-                <code className="bg-slate-50 px-1 py-0.5 rounded text-[10px] text-blue-500">张三 李四 王五,赵六,钱七</code>
-              </p>
-              <textarea
-                placeholder="在此输入名字列表..."
-                required
-                rows={4}
-                value={batchText}
-                onChange={(e) => setBatchText(e.target.value)}
-                className="w-full text-sm py-2 px-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-mono"
-              />
-              <div className="flex justify-end gap-2 text-xs">
+
+            {/* Method Select Tabs */}
+            <div className="flex border-b border-slate-100 text-xs font-semibold">
+              <button
+                type="button"
+                onClick={() => setImportMethod('excel')}
+                className={`pb-2 px-4 flex items-center gap-1.5 border-b-2 transition-all ${
+                  importMethod === 'excel'
+                    ? 'border-blue-600 text-blue-600 font-bold'
+                    : 'border-transparent text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                <FileSpreadsheet size={14} />
+                <span>Excel / CSV 导入 (推荐)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setImportMethod('paste')}
+                className={`pb-2 px-4 flex items-center gap-1.5 border-b-2 transition-all ${
+                  importMethod === 'paste'
+                    ? 'border-blue-600 text-blue-600 font-bold'
+                    : 'border-transparent text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                <ClipboardList size={14} />
+                <span>普通文本粘贴</span>
+              </button>
+            </div>
+
+            <form onSubmit={handleAddBatch} className="space-y-4">
+              {importMethod === 'excel' ? (
+                <div className="space-y-4">
+                  {/* Excel Upload Area */}
+                  <div
+                    onClick={() => excelFileRef.current?.click()}
+                    className="border-2 border-dashed border-slate-200 hover:border-blue-400 bg-slate-50/50 hover:bg-blue-50/10 rounded-2xl p-6 text-center cursor-pointer transition-all flex flex-col items-center justify-center gap-2 group"
+                  >
+                    <input
+                      type="file"
+                      ref={excelFileRef}
+                      onChange={handleExcelUpload}
+                      accept=".xlsx, .xls, .csv"
+                      className="hidden"
+                    />
+                    <div className="p-3 bg-white border border-slate-100 rounded-xl shadow-xs group-hover:scale-105 transition-transform text-blue-600">
+                      <Upload size={18} />
+                    </div>
+                    <div className="space-y-0.5">
+                      <p className="text-xs font-bold text-slate-700">点击或将 Excel / CSV 文件拖拽到此处</p>
+                      <p className="text-[10px] text-slate-400">支持 .xlsx, .xls, .csv 格式的文件</p>
+                    </div>
+                  </div>
+
+                  {/* Guide and Download template */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-blue-50/40 border border-blue-100/30 rounded-xl p-3 text-xs leading-relaxed text-slate-600">
+                    <div className="flex gap-2 items-start">
+                      <AlertCircle size={14} className="text-blue-500 shrink-0 mt-0.5" />
+                      <span>
+                        表格第一列为<strong>姓名 (必填)</strong>，第二列为<strong>备注</strong>，第三列为<strong>标签</strong> (逗号隔开)。
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleDownloadTemplate}
+                      className="flex items-center gap-1 text-[11px] font-bold text-blue-700 hover:text-blue-800 bg-white border border-blue-200/60 shadow-2xs hover:shadow-xs py-1.5 px-3 rounded-lg transition-all shrink-0 self-start sm:self-center"
+                    >
+                      <Download size={12} />
+                      <span>下载导入模板</span>
+                    </button>
+                  </div>
+
+                  {/* Parse error box */}
+                  {excelError && (
+                    <div className="flex gap-2 bg-rose-50 border border-rose-100 rounded-xl p-3 text-xs text-rose-700">
+                      <AlertCircle size={14} className="shrink-0 mt-0.5" />
+                      <span>{excelError}</span>
+                    </div>
+                  )}
+
+                  {/* Excel parsed results preview */}
+                  {parsedStudents.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center text-xs">
+                        <span className="font-bold text-slate-700 flex items-center gap-1">
+                          <span>待导入学生预览</span>
+                          <span className="bg-blue-50 text-blue-600 font-bold px-1.5 py-0.5 rounded text-[10px]">
+                            {parsedStudents.length} 人
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setParsedStudents([])}
+                          className="text-slate-400 hover:text-rose-500 text-[10px] transition-colors font-medium"
+                        >
+                          清空列表
+                        </button>
+                      </div>
+                      <div className="border border-slate-100 rounded-xl overflow-hidden max-h-[180px] overflow-y-auto bg-slate-50/20">
+                        <table className="w-full text-left text-xs border-collapse">
+                          <thead>
+                            <tr className="bg-slate-50 text-slate-500 border-b border-slate-100 font-semibold sticky top-0">
+                              <th className="py-2 px-3">姓名</th>
+                              <th className="py-2 px-3">备注 / 背景信息</th>
+                              <th className="py-2 px-3">标签</th>
+                              <th className="py-2 px-3 text-center w-12">操作</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 bg-white">
+                            {parsedStudents.map((stud, idx) => (
+                              <tr key={idx} className="hover:bg-slate-50/50">
+                                <td className="py-1.5 px-3 font-semibold text-slate-800">{stud.name}</td>
+                                <td className="py-1.5 px-3 text-slate-500 truncate max-w-[150px]">
+                                  {stud.notes || <span className="text-slate-300">-</span>}
+                                </td>
+                                <td className="py-1.5 px-3">
+                                  <div className="flex flex-wrap gap-1">
+                                    {stud.tags && stud.tags.length > 0 ? (
+                                      stud.tags.map(t => (
+                                        <span key={t} className="text-[9px] bg-slate-100 text-slate-600 px-1 py-0.2 rounded border border-slate-200/50">
+                                          {t}
+                                        </span>
+                                      ))
+                                    ) : (
+                                      <span className="text-slate-300">-</span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="py-1.5 px-3 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveParsedStudent(idx)}
+                                    className="text-slate-400 hover:text-rose-600 transition-colors p-0.5"
+                                  >
+                                    <Trash2 size={12} />
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    请直接在下方粘贴学生名单，名字之间用<strong className="text-blue-600">逗号、空格、或换行</strong>隔开，系统会自动提取并过滤。例如：
+                    <br />
+                    <code className="bg-slate-50 px-1 py-0.5 rounded text-[10px] text-blue-500 inline-block mt-1 font-mono">张三 李四 王五,赵六,钱七</code>
+                  </p>
+                  <textarea
+                    placeholder="在此输入名字列表..."
+                    required
+                    rows={4}
+                    value={batchText}
+                    onChange={(e) => setBatchText(e.target.value)}
+                    className="w-full text-sm py-2 px-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-mono"
+                  />
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 text-xs pt-2 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setIsAddingBatch(false)}
+                  onClick={() => {
+                    setIsAddingBatch(false);
+                    setParsedStudents([]);
+                    setExcelError(null);
+                  }}
                   className="py-2 px-4 bg-slate-50 hover:bg-slate-100 border border-slate-200/60 rounded-xl text-slate-600 transition-colors font-medium"
                 >
                   取消
                 </button>
                 <button
                   type="submit"
-                  className="py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl transition-colors shadow-sm"
+                  disabled={importMethod === 'excel' ? parsedStudents.length === 0 : !batchText.trim()}
+                  className={`py-2 px-4 font-bold rounded-xl transition-colors shadow-sm ${
+                    (importMethod === 'excel' ? parsedStudents.length === 0 : !batchText.trim())
+                      ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                      : 'bg-blue-600 hover:bg-blue-700 text-white'
+                  }`}
                 >
-                  解析并导入
+                  {importMethod === 'excel' ? `确认导入 (${parsedStudents.length}名学生)` : '解析并导入'}
                 </button>
               </div>
             </form>
