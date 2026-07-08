@@ -4,9 +4,11 @@ import {
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
   signOut,
-  User
+  User,
+  GoogleAuthProvider,
+  signInWithPopup
 } from 'firebase/auth';
-import { LogIn, UserPlus, LogOut, ShieldCheck, Mail, Lock, RefreshCw, AlertCircle, Cloud } from 'lucide-react';
+import { LogIn, UserPlus, LogOut, ShieldCheck, Mail, Lock, RefreshCw, AlertCircle, Cloud, Chrome } from 'lucide-react';
 import { motion } from 'motion/react';
 
 interface AuthModalProps {
@@ -71,6 +73,33 @@ export default function AuthModal({ user, onClose, onMergeLocalData, hasLocalDat
       setTimeout(() => onClose(), 1000);
     } catch (err) {
       setError('退出登录失败');
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setLoading(true);
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      const provider = new GoogleAuthProvider();
+      // Configure to select account (optional but good practice)
+      provider.setCustomParameters({ prompt: 'select_account' });
+      await signInWithPopup(auth, provider);
+      setSuccessMsg('Google 登录成功！');
+      setTimeout(() => onClose(), 1000);
+    } catch (err: any) {
+      console.error('Google Sign-In Error:', err);
+      let errMsg = 'Google 登录失败，请重试';
+      if (err.code === 'auth/popup-blocked') {
+        errMsg = '登录窗口被浏览器拦截，请允许弹出窗口并重试';
+      } else if (err.code === 'auth/cancelled-popup-request') {
+        errMsg = '登录窗口已被关闭';
+      } else if (err.message) {
+        errMsg = err.message;
+      }
+      setError(errMsg);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -165,72 +194,117 @@ export default function AuthModal({ user, onClose, onMergeLocalData, hasLocalDat
               </button>
             </div>
           ) : (
-            // Form to Login or Register
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-600 flex items-center gap-1">
-                  <Mail size={12} />
-                  电子邮箱 (Email)
-                </label>
-                <input
-                  type="email"
-                  required
-                  placeholder="请输入您的邮箱..."
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full text-sm py-2 px-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-mono"
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-600 flex items-center gap-1">
-                  <Lock size={12} />
-                  密码 (Password)
-                </label>
-                <input
-                  type="password"
-                  required
-                  placeholder="请输入 6 位及以上密码..."
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full text-sm py-2 px-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-mono"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-100 disabled:text-slate-400 text-white font-bold rounded-xl text-sm shadow-sm transition-all flex items-center justify-center gap-2"
-              >
-                {loading ? (
-                  <RefreshCw size={16} className="animate-spin" />
-                ) : isLogin ? (
-                  <>
-                    <LogIn size={16} />
-                    <span>确认登录</span>
-                  </>
-                ) : (
-                  <>
-                    <UserPlus size={16} />
-                    <span>注册新帐号</span>
-                  </>
-                )}
-              </button>
-
-              <div className="text-center pt-2">
+            // Form to Login or Register with Google Sign-In at the top
+            <div className="space-y-4">
+              {/* Google Sign-In - Recommended & Fully Enabled */}
+              <div className="space-y-2">
+                <p className="text-[11px] font-bold text-emerald-600 flex items-center gap-1 bg-emerald-50/50 px-2.5 py-1.5 rounded-lg border border-emerald-100/50">
+                  <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping"></span>
+                  推荐使用：项目已启用 Google 一键联机
+                </p>
                 <button
                   type="button"
-                  onClick={() => {
-                    setIsLogin(!isLogin);
-                    setError(null);
-                    setSuccessMsg(null);
-                  }}
-                  className="text-xs text-blue-600 hover:text-blue-700 font-bold transition-colors"
+                  onClick={handleGoogleSignIn}
+                  disabled={loading}
+                  className="w-full py-3 px-4 bg-white hover:bg-slate-50 disabled:bg-slate-50 text-slate-700 border border-slate-200 hover:border-slate-300 font-bold rounded-2xl text-xs shadow-xs hover:shadow-sm transition-all flex items-center justify-center gap-2.5"
                 >
-                  {isLogin ? '还没有帐号？立即注册' : '已有帐号？直接登录'}
+                  {loading ? (
+                    <RefreshCw size={14} className="animate-spin text-slate-400" />
+                  ) : (
+                    <Chrome size={16} className="text-blue-500 shrink-0" />
+                  )}
+                  <span>使用 Google 账号一键登录 / 注册</span>
                 </button>
               </div>
-            </form>
+
+              {/* Decorative Divider */}
+              <div className="flex items-center gap-2 py-1 text-slate-300">
+                <div className="h-px bg-slate-100 flex-1"></div>
+                <span className="text-[10px] text-slate-400 font-medium">或者</span>
+                <div className="h-px bg-slate-100 flex-1"></div>
+              </div>
+
+              {/* Form to Login or Register with Email */}
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-600 flex items-center gap-1">
+                    <Mail size={12} />
+                    电子邮箱 (Email)
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="请输入您的邮箱..."
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="w-full text-sm py-2 px-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-mono"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-600 flex items-center gap-1">
+                    <Lock size={12} />
+                    密码 (Password)
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    placeholder="请输入 6 位及以上密码..."
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full text-sm py-2 px-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-mono"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-2.5 bg-slate-800 hover:bg-slate-900 disabled:bg-slate-100 disabled:text-slate-400 text-white font-bold rounded-xl text-xs shadow-xs transition-all flex items-center justify-center gap-2"
+                >
+                  {loading ? (
+                    <RefreshCw size={14} className="animate-spin" />
+                  ) : isLogin ? (
+                    <>
+                      <LogIn size={14} />
+                      <span>确认登录 (邮箱)</span>
+                    </>
+                  ) : (
+                    <>
+                      <UserPlus size={14} />
+                      <span>注册新帐号 (邮箱)</span>
+                    </>
+                  )}
+                </button>
+
+                <div className="text-center pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsLogin(!isLogin);
+                      setError(null);
+                      setSuccessMsg(null);
+                    }}
+                    className="text-xs text-blue-600 hover:text-blue-700 font-medium transition-colors"
+                  >
+                    {isLogin ? '还没有邮箱账号？立即注册' : '已有邮箱账号？直接登录'}
+                  </button>
+                </div>
+
+                {/* Friendly explanation about operation-not-allowed */}
+                <div className="bg-slate-50 border border-slate-100 rounded-xl p-3 text-[10px] text-slate-500 leading-relaxed space-y-1">
+                  <p className="font-bold text-slate-600 flex items-center gap-1">
+                    <AlertCircle size={12} className="text-blue-500 shrink-0" />
+                    登录故障提示：
+                  </p>
+                  <p>
+                    若注册邮箱时出现 <code className="text-rose-600 font-mono bg-rose-50 px-1 py-0.5 rounded">auth/operation-not-allowed</code> 报错，代表您的 Firebase 控制台<b>邮箱登录通道未开启</b>。
+                  </p>
+                  <p className="text-emerald-700 font-bold">
+                    这是正常限制，请直接点击顶部的【使用 Google 账号一键登录】即可完美登录并同步数据！
+                  </p>
+                </div>
+              </form>
+            </div>
           )}
         </div>
       </motion.div>
